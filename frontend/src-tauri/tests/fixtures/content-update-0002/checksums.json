@@ -1,0 +1,10 @@
+{
+  "manifest_version": 1,
+  "package_sha256": "464f0acd2f9b8fdf0c56262711d821bbe65b02813f95288a97e42e3560a6fda0",
+  "files": {
+    "route-points.jsonl": "7cded66a096002a0b2ae2bdf4df52ef05654fdf8531911dd335fe0c86134fcbd",
+    "routes.jsonl": "1efb717d615950490d211c3b86b7554ef9a4a8fbece8ae936a452183c08f8e6e",
+    "studies.jsonl": "be65f921f408938448eca6286840bf7ed915610570e81ecd5618db02d2e83b42",
+    "translations.jsonl": "14ea466556cd8824e8537ef811c8f1d307e973befee8aaab86155285a6e14b2e"
+  }
+}

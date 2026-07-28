@@ -1,0 +1,31 @@
+{
+  "manifest_version": 1,
+  "update_id": "rhelo-bundled-baseline-v1",
+  "content_version": 1,
+  "source_version": "rhelo-db-2026-07-16",
+  "payload_sha256": "0ea6ad86f316ef3a826ac587f0f3d2aa03e922810385c5e28b876ae97c20bf84",
+  "expected_schema_version": 3,
+  "expected_table_counts": {
+    "commentaries": 934,
+    "cross_references": 256480,
+    "geography_routes": 3,
+    "route_points": 19,
+    "verse_translations": 248588,
+    "verses_base": 31100
+  },
+  "expected_translation_counts": {
+    "en": 31100,
+    "en_bsb": 31080,
+    "en_kjv": 31096,
+    "en_web": 31089,
+    "hi": 31098,
+    "ml": 31090,
+    "ta": 31096,
+    "te": 30939
+  },
+  "required_route_ids": [
+    "abraham",
+    "exodus",
+    "paul_1"
+  ]
+}

@@ -12,7 +12,8 @@
     "test:translations": "tsx --test scripts/translation-compare.test.ts",
     "test:sessions": "tsx --test scripts/session-editor.test.ts",
     "test:transcripts": "tsx --test scripts/transcript-review.test.ts",
-    "verify:desktop": "node --test scripts/desktop-version.test.mjs && npm run test:tts && npm run test:translations && npm run test:sessions && npm run test:transcripts && node scripts/verify-desktop-assets.mjs",
+    "test:content-updates": "node --test scripts/content-update-contract.test.mjs",
+    "verify:desktop": "node --test scripts/desktop-version.test.mjs && npm run test:tts && npm run test:translations && npm run test:sessions && npm run test:transcripts && npm run test:content-updates && node scripts/verify-desktop-assets.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

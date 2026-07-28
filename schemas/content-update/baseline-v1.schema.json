@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rhelobible.com/schemas/content-update/baseline-v1.schema.json",
+  "title": "Rhelo Bundled Content Baseline v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_version",
+    "update_id",
+    "content_version",
+    "source_version",
+    "payload_sha256",
+    "expected_schema_version",
+    "expected_table_counts",
+    "expected_translation_counts",
+    "required_route_ids"
+  ],
+  "properties": {
+    "manifest_version": {
+      "const": 1
+    },
+    "update_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.:-]+$"
+    },
+    "content_version": {
+      "const": 1
+    },
+    "source_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "payload_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "expected_schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "expected_table_counts": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "enum": [
+          "commentaries",
+          "cross_references",
+          "geography_routes",
+          "route_points",
+          "verse_translations",
+          "verses_base"
+        ]
+      },
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "expected_translation_counts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "required_route_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_.:-]+$"
+      }
+    }
+  }
+}

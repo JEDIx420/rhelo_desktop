@@ -38,6 +38,7 @@
     "resources": {
       "../../rhelo.db": "rhelo.db",
       "../../ggml-base.bin": "ggml-base.bin",
+      "resources/content-updates": "content-updates",
       "resources/fonts/NotoSans-Regular.ttf": "fonts/NotoSans-Regular.ttf",
       "resources/fonts/NotoSansHebrew-Regular.ttf": "fonts/NotoSansHebrew-Regular.ttf",
       "resources/fonts/NotoSansDevanagari-Regular.ttf": "fonts/NotoSansDevanagari-Regular.ttf",

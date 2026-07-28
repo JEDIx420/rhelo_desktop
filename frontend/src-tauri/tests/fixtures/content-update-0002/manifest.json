@@ -1,0 +1,67 @@
+{
+  "manifest_version": 1,
+  "update_id": "test-content-update-0002",
+  "content_version": 2,
+  "minimum_schema_version": 3,
+  "maximum_schema_version": 3,
+  "minimum_app_version": "0.1.1",
+  "package_created_at": "2026-07-28T00:00:00Z",
+  "package_sha256": "464f0acd2f9b8fdf0c56262711d821bbe65b02813f95288a97e42e3560a6fda0",
+  "payload_files": [
+    {
+      "path": "translations.jsonl",
+      "table": "verse_translations",
+      "mode": "insert_only",
+      "sha256": "14ea466556cd8824e8537ef811c8f1d307e973befee8aaab86155285a6e14b2e",
+      "expected_inserted_rows": 1,
+      "expected_updated_rows": 0,
+      "expected_deleted_rows": 0
+    },
+    {
+      "path": "routes.jsonl",
+      "table": "geography_routes",
+      "mode": "insert_only",
+      "sha256": "1efb717d615950490d211c3b86b7554ef9a4a8fbece8ae936a452183c08f8e6e",
+      "expected_inserted_rows": 1,
+      "expected_updated_rows": 0,
+      "expected_deleted_rows": 0
+    },
+    {
+      "path": "route-points.jsonl",
+      "table": "route_points",
+      "mode": "insert_only",
+      "sha256": "7cded66a096002a0b2ae2bdf4df52ef05654fdf8531911dd335fe0c86134fcbd",
+      "expected_inserted_rows": 2,
+      "expected_updated_rows": 0,
+      "expected_deleted_rows": 0
+    },
+    {
+      "path": "studies.jsonl",
+      "table": "commentaries",
+      "mode": "insert_only",
+      "sha256": "be65f921f408938448eca6286840bf7ed915610570e81ecd5618db02d2e83b42",
+      "expected_inserted_rows": 1,
+      "expected_updated_rows": 0,
+      "expected_deleted_rows": 0
+    }
+  ],
+  "expected_inserted_rows": 5,
+  "expected_updated_rows": 0,
+  "expected_deleted_rows": 0,
+  "affected_static_tables": [
+    "verse_translations",
+    "geography_routes",
+    "route_points",
+    "commentaries"
+  ],
+  "fts_rebuild": [],
+  "source_ids": [
+    "test-fixture"
+  ],
+  "licence_ids": [
+    "test-only"
+  ],
+  "attribution_references": [
+    "synthetic-fixture"
+  ]
+}

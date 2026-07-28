@@ -6,6 +6,8 @@ import { parseCargoLockPackageVersion } from "./desktop-version.mjs";
 const repositoryRoot = resolve("..");
 const schemaVersionPath = resolve(repositoryRoot, "schema-version.txt");
 const databasePath = resolve(repositoryRoot, "rhelo.db");
+const minimumRuntimeMigratableSchemaVersion = 1;
+const contentBaselinePath = resolve("src-tauri", "resources", "content-updates", "baseline.json");
 const fontFiles = [
   "NotoSans-Regular.ttf",
   "NotoSansHebrew-Regular.ttf",
@@ -17,6 +19,7 @@ const fontFiles = [
 const requiredAssets = [
   { path: databasePath, minimumBytes: 1_000_000, label: "Rhelo database" },
   { path: resolve(repositoryRoot, "ggml-base.bin"), minimumBytes: 1_000_000, label: "Whisper model" },
+  { path: contentBaselinePath, minimumBytes: 100, label: "Bundled content baseline" },
   ...fontFiles.map((filename) => ({
     path: resolve("src-tauri", "resources", "fonts", filename),
     minimumBytes: 10_000,
@@ -70,9 +73,12 @@ try {
       failures.push(`Rhelo database does not have a valid SQLite header: ${databasePath}`);
     } else {
       const bundledSchemaVersion = databaseHeader.readUInt32BE(60);
-      if (bundledSchemaVersion !== expectedSchemaVersion) {
+      if (
+        bundledSchemaVersion < minimumRuntimeMigratableSchemaVersion
+        || bundledSchemaVersion > expectedSchemaVersion
+      ) {
         failures.push(
-          `Bundled database user_version is ${bundledSchemaVersion}, but schema-version.txt requires ${expectedSchemaVersion}`
+          `Bundled database user_version ${bundledSchemaVersion} is outside the runtime-supported range ${minimumRuntimeMigratableSchemaVersion}-${expectedSchemaVersion}`
         );
       }
     }
@@ -86,6 +92,7 @@ try {
   const resources = tauriConfig?.bundle?.resources;
   if (resources?.["../../rhelo.db"] !== "rhelo.db") failures.push("Tauri must bundle rhelo.db at the resource root");
   if (resources?.["../../ggml-base.bin"] !== "ggml-base.bin") failures.push("Tauri must bundle the Whisper model at the resource root");
+  if (resources?.["resources/content-updates"] !== "content-updates") failures.push("Tauri must bundle the content baseline directory");
   for (const filename of fontFiles) {
     if (resources?.[`resources/fonts/${filename}`] !== `fonts/${filename}`) {
       failures.push(`Tauri must bundle ${filename} in the fonts resource directory`);

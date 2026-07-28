@@ -1,10 +1,8 @@
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
 use tauri::Manager;
 #[cfg(target_os = "windows")]
 use tauri_plugin_shell::ShellExt;
@@ -12,10 +10,16 @@ use tts::Tts;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 mod biblical_correction;
+mod content_updates;
+mod database_migrations;
 mod research;
 
 include!(concat!(env!("OUT_DIR"), "/schema_version.rs"));
-const DATABASE_BACKUP_PREFIX: &str = "rhelo.backup-schema";
+use database_migrations::open_database;
+#[cfg(test)]
+use database_migrations::{
+    apply_migrations, backup_path_for_suffix, read_user_version, DATABASE_BACKUP_PREFIX,
+};
 
 struct WhisperModelState {
     context: Mutex<Option<WhisperContext>>,
@@ -29,6 +33,11 @@ struct NativeTtsState {
 
 pub(crate) struct DatabaseState {
     pub(crate) path: PathBuf,
+}
+
+struct PreparedDatabase {
+    path: PathBuf,
+    content_update_status: content_updates::ContentUpdateStatus,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -154,215 +163,11 @@ struct TranslationPassageResponse {
     verses: Vec<TranslationPassageVerse>,
 }
 
-pub(crate) fn open_database(path: &Path) -> Result<Connection, String> {
-    let connection = Connection::open(path)
-        .map_err(|error| format!("Failed to open the Rhelo database: {error}"))?;
-    connection
-        .busy_timeout(Duration::from_secs(5))
-        .map_err(|error| format!("Failed to configure SQLite busy timeout: {error}"))?;
-    connection
-        .execute_batch("PRAGMA foreign_keys = ON;")
-        .map_err(|error| format!("Failed to configure SQLite: {error}"))?;
-    Ok(connection)
-}
-
-fn read_user_version(connection: &Connection) -> Result<i32, String> {
-    connection
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .map_err(|error| format!("Failed to read SQLite user_version: {error}"))
-}
-
-fn backup_path_for_suffix(
+#[cfg(test)]
+fn ensure_database_schema(
     database_path: &Path,
-    from_version: i32,
-    to_version: i32,
-    suffix: usize,
-) -> PathBuf {
-    let parent = database_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    if suffix == 0 {
-        parent.join(format!(
-            "{DATABASE_BACKUP_PREFIX}-v{from_version}-to-v{to_version}.sqlite3"
-        ))
-    } else {
-        parent.join(format!(
-            "{DATABASE_BACKUP_PREFIX}-v{from_version}-to-v{to_version}-{suffix}.sqlite3"
-        ))
-    }
-}
-
-fn create_database_backup(
-    database_path: &Path,
-    from_version: i32,
-    to_version: i32,
-) -> Result<PathBuf, String> {
-    for suffix in 0.. {
-        let backup_path = backup_path_for_suffix(database_path, from_version, to_version, suffix);
-        let destination = match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&backup_path)
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                return Err(format!(
-                    "Failed to reserve database backup path {:?}: {error}",
-                    backup_path
-                ))
-            }
-        };
-
-        let mut source = fs::File::open(database_path).map_err(|error| {
-            let _ = fs::remove_file(&backup_path);
-            format!(
-                "Failed to open the writable database for backup {:?}: {error}",
-                database_path
-            )
-        })?;
-        let mut destination = destination;
-        if let Err(error) = io::copy(&mut source, &mut destination) {
-            drop(destination);
-            let _ = fs::remove_file(&backup_path);
-            return Err(format!(
-                "Failed to back up the writable database to {:?}: {error}",
-                backup_path
-            ));
-        }
-        if let Err(error) = destination.sync_all() {
-            drop(destination);
-            let _ = fs::remove_file(&backup_path);
-            return Err(format!(
-                "Failed to flush database backup {:?}: {error}",
-                backup_path
-            ));
-        }
-        return Ok(backup_path);
-    }
-
-    unreachable!("the collision-safe backup suffix space is unbounded")
-}
-
-type MigrationFn = fn(&Transaction<'_>) -> Result<(), String>;
-
-fn migration_001_baseline(transaction: &Transaction<'_>) -> Result<(), String> {
-    transaction
-        .execute_batch(
-            "
-            CREATE TABLE IF NOT EXISTS sessions (
-                session_id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                content TEXT,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS session_documents (
-                document_id TEXT PRIMARY KEY,
-                session_id TEXT,
-                file_path TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
-            );
-
-            CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
-                session_id UNINDEXED,
-                title,
-                content
-            );
-
-            CREATE TRIGGER IF NOT EXISTS trg_sessions_ai AFTER INSERT ON sessions BEGIN
-                INSERT INTO sessions_fts (session_id, title, content)
-                VALUES (new.session_id, new.title, new.content);
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS trg_sessions_ad AFTER DELETE ON sessions BEGIN
-                DELETE FROM sessions_fts WHERE session_id = old.session_id;
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS trg_sessions_au AFTER UPDATE ON sessions BEGIN
-                UPDATE sessions_fts
-                SET title = new.title, content = new.content
-                WHERE session_id = old.session_id;
-            END;
-            ",
-        )
-        .map_err(|error| {
-            format!("Migration 1 failed while ensuring study-session tables: {error}")
-        })?;
-
-    transaction
-        .execute(
-            "
-            INSERT INTO sessions_fts (session_id, title, content)
-            SELECT s.session_id, s.title, s.content
-            FROM sessions s
-            WHERE NOT EXISTS (
-                SELECT 1
-                FROM sessions_fts f
-                WHERE f.session_id = s.session_id
-            )
-            ",
-            [],
-        )
-        .map_err(|error| format!("Migration 1 failed while syncing sessions_fts: {error}"))?;
-
-    Ok(())
-}
-
-fn ordered_migrations() -> &'static [(i32, MigrationFn)] {
-    &[(1, migration_001_baseline)]
-}
-
-fn apply_migrations(connection: &mut Connection, from_version: i32) -> Result<(), String> {
-    for (version, migration) in ordered_migrations() {
-        if *version <= from_version {
-            continue;
-        }
-
-        let transaction = connection
-            .transaction()
-            .map_err(|error| format!("Failed to start migration transaction {version}: {error}"))?;
-        migration(&transaction)?;
-        transaction
-            .execute_batch(&format!("PRAGMA user_version = {version};"))
-            .map_err(|error| {
-                format!("Migration {version} failed while updating user_version: {error}")
-            })?;
-        transaction
-            .commit()
-            .map_err(|error| format!("Failed to commit migration {version}: {error}"))?;
-    }
-    Ok(())
-}
-
-fn ensure_database_schema(database_path: &Path) -> Result<(), String> {
-    let mut connection = open_database(database_path)?;
-    let user_version = read_user_version(&connection)?;
-
-    if user_version > CURRENT_SCHEMA_VERSION {
-        return Err(format!(
-            "The writable database schema version ({user_version}) is newer than this app supports ({CURRENT_SCHEMA_VERSION})."
-        ));
-    }
-
-    if user_version == CURRENT_SCHEMA_VERSION {
-        return Ok(());
-    }
-
-    let backup_path = create_database_backup(database_path, user_version, CURRENT_SCHEMA_VERSION)?;
-    println!(
-        "Running database migrations from schema v{} to v{} using backup {:?}",
-        user_version, CURRENT_SCHEMA_VERSION, backup_path
-    );
-
-    apply_migrations(&mut connection, user_version).map_err(|error| {
-        format!(
-            "Database migration failed at schema version {user_version}. Backup preserved at {:?}. {error}",
-            backup_path
-        )
-    })
+) -> Result<database_migrations::SchemaMigrationReport, String> {
+    database_migrations::ensure_database_schema(database_path, true)
 }
 
 fn read_session(connection: &Connection, session_id: &str) -> Result<Option<Session>, String> {
@@ -677,8 +482,7 @@ fn delete_session(
     })
 }
 
-fn prepare_database(app: &mut tauri::App) -> Result<PathBuf, String> {
-    // 1. Resolve source and destination DB paths
+fn prepare_database(app: &mut tauri::App) -> Result<PreparedDatabase, String> {
     let db_src = app
         .path()
         .resolve("rhelo.db", tauri::path::BaseDirectory::Resource)
@@ -688,13 +492,26 @@ fn prepare_database(app: &mut tauri::App) -> Result<PathBuf, String> {
         .path()
         .resolve("rhelo.db", tauri::path::BaseDirectory::AppData)
         .map_err(|e| format!("Failed to resolve destination DB path: {}", e))?;
+    let content_root = app
+        .path()
+        .resolve("content-updates", tauri::path::BaseDirectory::Resource)
+        .map_err(|e| format!("Failed to resolve bundled content updates: {e}"))?;
 
-    prepare_database_at_paths(&db_src, &db_dest)
+    prepare_database_with_content_at_paths(&db_src, &db_dest, Some(&content_root))
 }
 
+#[cfg(test)]
 fn prepare_database_at_paths(db_src: &Path, db_dest: &Path) -> Result<PathBuf, String> {
-    // Copying a current seed is a fresh install, so schema validation is a no-op.
-    if !db_dest.exists() {
+    prepare_database_with_content_at_paths(db_src, db_dest, None).map(|prepared| prepared.path)
+}
+
+fn prepare_database_with_content_at_paths(
+    db_src: &Path,
+    db_dest: &Path,
+    content_root: Option<&Path>,
+) -> Result<PreparedDatabase, String> {
+    let fresh_install = !db_dest.exists();
+    if fresh_install {
         if let Some(parent) = db_dest.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create AppData directories: {}", e))?;
@@ -707,9 +524,15 @@ fn prepare_database_at_paths(db_src: &Path, db_dest: &Path) -> Result<PathBuf, S
         })?;
     }
 
-    ensure_database_schema(db_dest)?;
+    database_migrations::ensure_database_schema(db_dest, !fresh_install)?;
 
-    Ok(db_dest.to_path_buf())
+    let content_update_status = content_root
+        .map(|root| content_updates::process_bundled_content_updates_safely(db_dest, root))
+        .unwrap_or_default();
+    Ok(PreparedDatabase {
+        path: db_dest.to_path_buf(),
+        content_update_status,
+    })
 }
 
 fn normalize_language_tag(language: &str) -> String {
@@ -1190,6 +1013,61 @@ mod tts_voice_tests {
             .unwrap();
     }
 
+    fn create_static_schema_v1(connection: &Connection) {
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE verses_base (id TEXT PRIMARY KEY);
+                CREATE VIEW verses AS SELECT id FROM verses_base;
+                CREATE TABLE geography_places (place_id TEXT PRIMARY KEY);
+                CREATE TABLE timeline_events (event_id TEXT PRIMARY KEY);
+                CREATE TABLE dictionary_entries (slug TEXT PRIMARY KEY);
+                CREATE TABLE people (id TEXT PRIMARY KEY);
+                CREATE TABLE commentaries (
+                    commentary_id TEXT,
+                    verse_id TEXT,
+                    text TEXT,
+                    PRIMARY KEY(commentary_id, verse_id),
+                    FOREIGN KEY(verse_id) REFERENCES verses(id)
+                );
+                CREATE TABLE verse_geography (
+                    verse_id TEXT,
+                    place_id TEXT,
+                    FOREIGN KEY(verse_id) REFERENCES verses(id),
+                    FOREIGN KEY(place_id) REFERENCES geography_places(place_id),
+                    PRIMARY KEY(verse_id, place_id)
+                );
+                CREATE TABLE event_verses (
+                    event_id TEXT,
+                    verse_id TEXT,
+                    PRIMARY KEY(event_id, verse_id),
+                    FOREIGN KEY(event_id) REFERENCES timeline_events(event_id),
+                    FOREIGN KEY(verse_id) REFERENCES verses(id)
+                );
+                CREATE TABLE dictionary_scripture_refs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entry_slug TEXT NOT NULL
+                        REFERENCES dictionary_entries(slug) ON DELETE CASCADE,
+                    verse_id TEXT NOT NULL REFERENCES verses(id) ON DELETE CASCADE
+                );
+                CREATE TABLE relationships (
+                    id TEXT PRIMARY KEY,
+                    person_id_1 TEXT NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+                    relationship_type TEXT NOT NULL,
+                    person_id_2 TEXT NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+                    verse_id TEXT REFERENCES verses(id) ON DELETE SET NULL,
+                    notes TEXT
+                );
+                CREATE TABLE people_verses (
+                    person_id TEXT NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+                    verse_id TEXT NOT NULL REFERENCES verses(id) ON DELETE CASCADE,
+                    PRIMARY KEY (person_id, verse_id)
+                );
+                ",
+            )
+            .unwrap();
+    }
+
     #[test]
     fn backup_name_has_schema_metadata() {
         let path = PathBuf::from("/tmp/rhelo.db");
@@ -1203,6 +1081,7 @@ mod tts_voice_tests {
     fn migrates_version_zero_database_to_current() {
         let db_path = temp_db_path("migrate.sqlite3");
         let connection = create_db(&db_path);
+        create_static_schema_v1(&connection);
         connection
             .execute_batch("PRAGMA user_version = 0;")
             .unwrap();
@@ -1346,6 +1225,7 @@ mod tts_voice_tests {
 
         let installed = create_db(&app_data_path);
         create_session_schema(&installed);
+        create_static_schema_v1(&installed);
         installed
             .execute(
                 "INSERT INTO sessions (session_id, title, content) VALUES ('upgrade', 'Survives', 'Body')",
@@ -1377,6 +1257,7 @@ mod tts_voice_tests {
     fn migration_is_effectively_idempotent() {
         let db_path = temp_db_path("idempotent.sqlite3");
         let connection = create_db(&db_path);
+        create_static_schema_v1(&connection);
         connection
             .execute_batch("PRAGMA user_version = 0;")
             .unwrap();
@@ -1397,6 +1278,7 @@ mod tts_voice_tests {
         let db_path = temp_db_path("sessions.sqlite3");
         let connection = create_db(&db_path);
         create_session_schema(&connection);
+        create_static_schema_v1(&connection);
         connection
             .execute_batch("PRAGMA user_version = 0;")
             .unwrap();
@@ -1425,6 +1307,7 @@ mod tts_voice_tests {
     fn backup_is_created_before_migration() {
         let db_path = temp_db_path("backup.sqlite3");
         let connection = create_db(&db_path);
+        create_static_schema_v1(&connection);
         connection
             .execute_batch("PRAGMA user_version = 0;")
             .unwrap();
@@ -1450,6 +1333,7 @@ mod tts_voice_tests {
     fn existing_backup_is_preserved_and_retry_uses_a_suffix() {
         let db_path = temp_db_path("collision.sqlite3");
         let connection = create_db(&db_path);
+        create_static_schema_v1(&connection);
         connection
             .execute_batch("PRAGMA user_version = 0;")
             .unwrap();
@@ -1504,6 +1388,7 @@ mod tts_voice_tests {
     fn ordered_migrations_can_run_directly() {
         let db_path = temp_db_path("apply.sqlite3");
         let mut connection = create_db(&db_path);
+        create_static_schema_v1(&connection);
         connection
             .execute_batch("PRAGMA user_version = 0;")
             .unwrap();
@@ -1528,6 +1413,13 @@ fn stop_speech(tts_state: tauri::State<'_, NativeTtsState>) -> Result<(), String
     tts.stop()
         .map_err(|error| format!("[tts:stop-failed] Failed to stop speech: {error}"))?;
     Ok(())
+}
+
+#[tauri::command]
+fn fetch_database_startup_status(
+    status: tauri::State<'_, content_updates::ContentUpdateStatus>,
+) -> content_updates::ContentUpdateStatus {
+    status.inner().clone()
 }
 
 #[tauri::command]
@@ -1592,7 +1484,7 @@ pub fn run() {
                 }
             }
 
-            let database_path = prepare_database(app).map_err(|error| {
+            let prepared_database = prepare_database(app).map_err(|error| {
                 eprintln!("CRITICAL BOOT ERROR: {error:?}");
                 if let Ok(mut home) = app.path().home_dir() {
                     home.push("rhelo_boot_error.log");
@@ -1602,8 +1494,9 @@ pub fn run() {
                 std::io::Error::other(error)
             })?;
             app.manage(DatabaseState {
-                path: database_path,
+                path: prepared_database.path,
             });
+            app.manage(prepared_database.content_update_status);
             app.manage(biblical_correction::BiblicalVocabularyState::default());
             if let Ok(mut home) = app.path().home_dir() {
                 home.push("rhelo_boot_error.log");
@@ -1694,6 +1587,7 @@ pub fn run() {
             update_session,
             delete_session,
             biblical_correction::suggest_biblical_terms,
+            fetch_database_startup_status,
             fetch_tts_diagnostics,
             open_windows_settings,
             speak_text,

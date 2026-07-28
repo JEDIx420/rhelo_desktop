@@ -388,6 +388,21 @@ export async function deleteSession(sessionId: string) {
   return invokeDesktop<{ status: string; session_id: string }>("delete_session", { sessionId });
 }
 
+export interface DatabaseStartupStatus {
+  contentVersion: number;
+  appliedUpdateIds: string[];
+  warning: string | null;
+  baselineDurationMs: number;
+  discoveryDurationMs: number;
+  validationDurationMs: number;
+  backupDurationMs: number;
+  applicationDurationMs: number;
+}
+
+export async function fetchDatabaseStartupStatus(): Promise<DatabaseStartupStatus> {
+  return invokeDesktop<DatabaseStartupStatus>("fetch_database_startup_status");
+}
+
 export type BiblicalSuggestionCategory =
   | "Bible book"
   | "Person"

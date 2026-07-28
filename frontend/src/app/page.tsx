@@ -7,8 +7,8 @@ import AppViewRouter from "@/components/AppViewRouter";
 import TranscriptReviewModal from "@/components/TranscriptReviewModal";
 import { TtsWarning } from "@/components/TtsWarning";
 import { motion, AnimatePresence } from "framer-motion";
-import { Mic, Save } from "lucide-react";
-import { fetchSessions, updateSession } from "@/lib/api";
+import { AlertTriangle, Mic, Save, X } from "lucide-react";
+import { fetchDatabaseStartupStatus, fetchSessions, updateSession } from "@/lib/api";
 import { readVerseDragPayload, renderVerseDropHtml, VerseDragPayload } from "@/lib/verseDrop";
 import { createTtsSettingsTarget, type OriginalLanguage, type TtsSettingsTarget } from "@/lib/ttsRecovery";
 import { flushActiveSessionEdits } from "@/lib/sessionSaveBridge";
@@ -98,6 +98,7 @@ export default function Home() {
     message: string;
     targetView: string;
   } | null>(null);
+  const [contentUpdateWarning, setContentUpdateWarning] = useState<string | null>(null);
 
   // Drag-and-drop overlays state
   const [draggedVerse, setDraggedVerse] = useState<VerseDragPayload | null>(null);
@@ -116,6 +117,13 @@ export default function Home() {
   const [transcribedText, setTranscribedText] = useState<string | null>(null);
   const [isProcessingSTT, setIsProcessingSTT] = useState(false);
   const [reviewTargetSessionId, setReviewTargetSessionId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !(window as any).__TAURI_INTERNALS__) return;
+    void fetchDatabaseStartupStatus()
+      .then((status) => setContentUpdateWarning(status.warning))
+      .catch(() => undefined);
+  }, []);
 
   // Track window drag listeners
   // WebKit (WKWebView/Tauri macOS) fires dragend before drop completes —
@@ -438,6 +446,24 @@ export default function Home() {
       </main>
 
       <TtsWarning onGoToSettings={handleGoToTtsSettings} />
+
+      {contentUpdateWarning ? (
+        <div
+          role="status"
+          className="fixed left-1/2 top-5 z-[2600] flex w-[min(680px,calc(100%-2rem))] -translate-x-1/2 items-start gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950 shadow-xl"
+        >
+          <AlertTriangle size={18} className="mt-0.5 shrink-0" />
+          <span className="flex-1">{contentUpdateWarning}</span>
+          <button
+            type="button"
+            onClick={() => setContentUpdateWarning(null)}
+            aria-label="Dismiss content update warning"
+            className="rounded-md p-1 hover:bg-amber-100"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      ) : null}
 
       {sessionSaveError ? (
         <div className="fixed bottom-6 left-1/2 z-[2500] flex max-w-2xl -translate-x-1/2 items-center gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950 shadow-xl">

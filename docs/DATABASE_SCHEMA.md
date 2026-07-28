@@ -67,6 +67,12 @@ The view joins `verses_base` to the legacy `en`, `hi`, `te`, `ml`, and `ta` rows
 
 `chat_history` is a legacy data table present in the built database but is not consumed by the current frontend or MCP surface. It is retained for data compatibility until a dedicated migration can establish whether existing installations contain user-owned history.
 
+## Runtime Metadata
+
+Schema v3 adds `content_updates`, which records recognized bundled content
+versions and applied static-content package identities. It contains no user
+content. See `BUNDLED_CONTENT_UPDATES.md`.
+
 ## Study-session tables
 
 - `sessions(session_id, title, content, updated_at)` stores TipTap HTML and is ordered by most recent update.
@@ -98,7 +104,7 @@ The application uses six logical FTS5 tables. SQLite also creates internal `_con
 - `trg_sessions_ai`, `trg_sessions_au`, and `trg_sessions_ad` synchronize session search.
 - The current audited database returns `ok` from `PRAGMA integrity_check`.
 
-Foreign-key declarations document relationships, but each connection does not currently enable `PRAGMA foreign_keys = ON`. Code should therefore not assume SQLite will reject every orphan automatically; migrations and service tests remain responsible for referential correctness.
+Runtime database connections enable `PRAGMA foreign_keys = ON`. Schema migrations temporarily disable enforcement only when SQLite requires table reconstruction, then restore enforcement and require both `PRAGMA foreign_key_check` and `PRAGMA integrity_check` to pass before startup continues.
 
 ## Edition read pattern
 

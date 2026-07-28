@@ -1,16 +1,20 @@
 # Database Migration and Recovery
 
-`schema-version.txt` is the single repository source for the current SQLite schema version. The Rust build script generates `CURRENT_SCHEMA_VERSION` from it. `scripts/finalize_seed_database.py`, invoked at the end of `setup.sh`, writes the same value to the generated seed database. `npm run verify:desktop` reads the SQLite header and fails when the bundled `PRAGMA user_version` differs.
+`schema-version.txt` is the single repository source for the latest SQLite schema version. The Rust build script generates `CURRENT_SCHEMA_VERSION` from it. `scripts/finalize_seed_database.py`, invoked at the end of `setup.sh`, currently marks the output of legacy data migrations 000-012 as schema v1. Runtime migrations then perform the same tested v1-to-v3 upgrade used for existing installations.
+
+The bundled seed may intentionally be older than the latest runtime schema when the app contains a tested migration path. Asset verification accepts seed versions 1 through the current schema and rejects unsupported older or future versions.
 
 ## Startup Behavior
 
-- Fresh install: Rhelo copies the current bundled seed to the platform app-data directory. No migration or backup is created.
+- Fresh install: Rhelo copies the bundled seed to the platform app-data directory, migrates the new copy, and does not create a migration backup because no user data exists yet.
 - Current install: Rhelo opens the existing writable database without replacing, migrating, or backing it up.
 - Older install: Rhelo creates a backup beside the writable database, then runs ordered migrations in transactions.
 
 ## Backups
 
-Backups are stored beside the writable `rhelo.db`. The first backup is named `rhelo.backup-schema-v{from}-to-v{to}.sqlite3`; collisions receive `-1`, `-2`, and higher numeric suffixes. Files are created with non-overwriting semantics, so a retry cannot replace an earlier backup.
+Backups are stored beside the writable `rhelo.db`. The first backup is named `rhelo.backup-schema-v{from}-to-v{to}.sqlite3`; collisions receive `-1`, `-2`, and higher numeric suffixes. Files are created with non-overwriting semantics through SQLite's consistent online backup API, reopened, and checked before migration, so a retry cannot replace an earlier backup.
+
+Schema v2 and v3 are documented in `DATABASE_MIGRATION_V2.md` and `BUNDLED_CONTENT_UPDATES.md`.
 
 Rhelo does not automatically delete migration backups. Users may archive or remove old backups after confirming the upgraded database works.
 
