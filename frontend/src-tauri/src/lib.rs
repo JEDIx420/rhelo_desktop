@@ -11,6 +11,7 @@ use tauri_plugin_shell::ShellExt;
 use tts::Tts;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+mod biblical_correction;
 mod research;
 
 include!(concat!(env!("OUT_DIR"), "/schema_version.rs"));
@@ -27,7 +28,7 @@ struct NativeTtsState {
 }
 
 pub(crate) struct DatabaseState {
-    path: PathBuf,
+    pub(crate) path: PathBuf,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -1603,6 +1604,7 @@ pub fn run() {
             app.manage(DatabaseState {
                 path: database_path,
             });
+            app.manage(biblical_correction::BiblicalVocabularyState::default());
             if let Ok(mut home) = app.path().home_dir() {
                 home.push("rhelo_boot_error.log");
                 let _ = std::fs::remove_file(home);
@@ -1691,6 +1693,7 @@ pub fn run() {
             create_session,
             update_session,
             delete_session,
+            biblical_correction::suggest_biblical_terms,
             fetch_tts_diagnostics,
             open_windows_settings,
             speak_text,

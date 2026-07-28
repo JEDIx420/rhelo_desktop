@@ -180,3 +180,26 @@ export function isSelectionSnapshotValid(
     && snapshot.to <= documentSize
   );
 }
+
+export function getSessionDeleteConfirmationMessage(title: string): string {
+  return `Delete "${title}"?\n\nThis permanently deletes the session and its attached documents. This action cannot be undone.`;
+}
+
+export async function runConfirmedSessionDeletion(input: {
+  sessionId: string;
+  title: string;
+  confirm: (message: string) => boolean;
+  discardPending: (sessionId: string) => void;
+  restorePending: (sessionId: string) => void;
+  deleteSession: (sessionId: string) => Promise<void>;
+}): Promise<boolean> {
+  if (!input.confirm(getSessionDeleteConfirmationMessage(input.title))) return false;
+  input.discardPending(input.sessionId);
+  try {
+    await input.deleteSession(input.sessionId);
+    return true;
+  } catch (error) {
+    input.restorePending(input.sessionId);
+    throw error;
+  }
+}

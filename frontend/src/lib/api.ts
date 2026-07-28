@@ -388,6 +388,46 @@ export async function deleteSession(sessionId: string) {
   return invokeDesktop<{ status: string; session_id: string }>("delete_session", { sessionId });
 }
 
+export type BiblicalSuggestionCategory =
+  | "Bible book"
+  | "Person"
+  | "Place"
+  | "Biblical term";
+
+export interface BiblicalSuggestionCandidate {
+  term: string;
+  category: BiblicalSuggestionCategory;
+  distance: number;
+  rank: number;
+}
+
+export interface BiblicalTermSuggestion {
+  original: string;
+  start: number;
+  end: number;
+  candidates: BiblicalSuggestionCandidate[];
+}
+
+export interface BiblicalSuggestionResponse {
+  suggestions: BiblicalTermSuggestion[];
+  supported: boolean;
+  language: "en-Latn";
+  truncated: boolean;
+  vocabularySize: number;
+  initializationMs: number;
+  matchingMs: number;
+}
+
+export async function suggestBiblicalTerms(
+  transcript: string,
+  maxSuggestions = 20,
+): Promise<BiblicalSuggestionResponse> {
+  return invokeDesktop<BiblicalSuggestionResponse>("suggest_biblical_terms", {
+    transcript,
+    maxSuggestions,
+  });
+}
+
 export async function searchSessions(query: string): Promise<{ sessions: SessionRecord[] }> {
   return invokeDesktop<{ sessions: SessionRecord[] }>("search_sessions", { query });
 }

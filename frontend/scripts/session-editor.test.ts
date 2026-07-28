@@ -4,8 +4,10 @@ import test from "node:test";
 
 import {
   isSelectionSnapshotValid,
+  getSessionDeleteConfirmationMessage,
   normalizeSessionHtml,
   resolveFontSizeState,
+  runConfirmedSessionDeletion,
   SessionSaveCoordinator,
   shouldLoadSessionContent,
   type SessionSaveSnapshot,
@@ -222,4 +224,60 @@ test("editor commands, loop guard, history reset, and scoped structures are wire
   assert.match(css, /list-style-type: disc/);
   assert.match(css, /list-style-type: decimal/);
   assert.match(css, /\.session-editor \.ProseMirror blockquote/);
+});
+
+test("session deletion confirmation identifies the session and Cancel performs no delete", async () => {
+  let deletes = 0;
+  let discarded = 0;
+  const result = await runConfirmedSessionDeletion({
+    sessionId: "session-a",
+    title: "Romans Notes",
+    confirm: (message) => {
+      assert.equal(message, getSessionDeleteConfirmationMessage("Romans Notes"));
+      assert.match(message, /attached documents/);
+      assert.match(message, /cannot be undone/);
+      return false;
+    },
+    discardPending: () => {
+      discarded += 1;
+    },
+    restorePending: () => undefined,
+    deleteSession: async () => {
+      deletes += 1;
+    },
+  });
+  assert.equal(result, false);
+  assert.equal(discarded, 0);
+  assert.equal(deletes, 0);
+});
+
+test("confirmed session deletion cancels pending writes and invokes delete once", async () => {
+  const calls: string[] = [];
+  const result = await runConfirmedSessionDeletion({
+    sessionId: "session-a",
+    title: "Romans Notes",
+    confirm: () => true,
+    discardPending: (sessionId) => calls.push(`discard:${sessionId}`),
+    restorePending: (sessionId) => calls.push(`restore:${sessionId}`),
+    deleteSession: async (sessionId) => {
+      calls.push(`delete:${sessionId}`);
+    },
+  });
+  assert.equal(result, true);
+  assert.deepEqual(calls, ["discard:session-a", "delete:session-a"]);
+});
+
+test("failed session deletion restores pending-save eligibility", async () => {
+  const calls: string[] = [];
+  await assert.rejects(runConfirmedSessionDeletion({
+    sessionId: "session-a",
+    title: "Romans Notes",
+    confirm: () => true,
+    discardPending: (sessionId) => calls.push(`discard:${sessionId}`),
+    restorePending: (sessionId) => calls.push(`restore:${sessionId}`),
+    deleteSession: async () => {
+      throw new Error("delete failed");
+    },
+  }), /delete failed/);
+  assert.deepEqual(calls, ["discard:session-a", "restore:session-a"]);
 });

@@ -4,6 +4,7 @@ import { Component, useState, useEffect, useRef, type ErrorInfo, type ReactNode 
 import Sidebar from "@/components/Sidebar";
 import CommandCenter from "@/components/CommandCenter";
 import AppViewRouter from "@/components/AppViewRouter";
+import TranscriptReviewModal from "@/components/TranscriptReviewModal";
 import { TtsWarning } from "@/components/TtsWarning";
 import { motion, AnimatePresence } from "framer-motion";
 import { Mic, Save } from "lucide-react";
@@ -11,6 +12,7 @@ import { fetchSessions, updateSession } from "@/lib/api";
 import { readVerseDragPayload, renderVerseDropHtml, VerseDragPayload } from "@/lib/verseDrop";
 import { createTtsSettingsTarget, type OriginalLanguage, type TtsSettingsTarget } from "@/lib/ttsRecovery";
 import { flushActiveSessionEdits } from "@/lib/sessionSaveBridge";
+import { buildTranscriptAppendHtml } from "@/lib/transcriptReview";
 
 const invokeTauri = async (cmd: string, args: any) => {
   if (typeof window !== "undefined" && (window as any).__TAURI_INTERNALS__ !== undefined) {
@@ -337,7 +339,7 @@ export default function Home() {
       const contentWithDate = addDateHeaderIfNeeded(targetSession.content || "");
       const timestamp = new Date().toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: true });
       
-      const updatedContent = contentWithDate + `<p><strong>[${timestamp}]</strong>: ${transcribedText.trim()}</p>`;
+      const updatedContent = contentWithDate + buildTranscriptAppendHtml(transcribedText, timestamp);
       await updateSession(reviewTargetSessionId, targetSession.title, updatedContent);
       setStudySessionsList(sessions.map((session: any) =>
         session.session_id === reviewTargetSessionId
@@ -573,79 +575,17 @@ export default function Home() {
         </button>
       </div>
 
-      {/* STT Dictation Review Modal */}
-      <AnimatePresence>
-        {transcribedText !== null && (
-          <div className="fixed inset-0 z-[3000] flex items-center justify-center p-6 bg-slate-900/30 backdrop-blur-xs">
-            <div className="fixed inset-0" onClick={() => setTranscribedText(null)} />
-            <motion.div
-              initial={{ opacity: 0, y: 50, scale: 0.95 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 50, scale: 0.95 }}
-              transition={{ duration: 0.2, ease: "easeOut" }}
-              className="bg-white border border-slate-200 shadow-2xl rounded-3xl w-full max-w-xl p-6 flex flex-col gap-4 font-sans z-[3010]"
-            >
-              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-                <h4 className="font-extrabold text-lg text-slate-900 font-sans">
-                  Dictation Review
-                </h4>
-                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 font-sans">
-                  Speech-to-Text
-                </span>
-              </div>
-
-              <div className="flex flex-col gap-2">
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-wider font-sans">
-                  Transcribed Text
-                </label>
-                <textarea
-                  value={transcribedText}
-                  onChange={(e) => setTranscribedText(e.target.value)}
-                  className="w-full h-24 border border-slate-200 rounded-xl p-3 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-sans leading-relaxed resize-none"
-                  placeholder="Captured speech will appear here..."
-                />
-              </div>
-
-              <div className="flex flex-col gap-2">
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-wider font-sans">
-                  Target Study Log
-                </label>
-                <select
-                  value={reviewTargetSessionId || ""}
-                  onChange={(e) => setReviewTargetSessionId(e.target.value)}
-                  className="w-full bg-white border border-slate-200 rounded-xl p-3 text-sm text-slate-850 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 shadow-sm cursor-pointer font-sans"
-                >
-                  {studySessionsList.length === 0 ? (
-                    <option value="">No sessions available</option>
-                  ) : (
-                    studySessionsList.map((s) => (
-                      <option key={s.session_id} value={s.session_id}>
-                        {s.title}
-                      </option>
-                    ))
-                  )}
-                </select>
-              </div>
-
-              <div className="flex items-center justify-end gap-3 pt-2 border-t border-slate-100">
-                <button
-                  onClick={() => setTranscribedText(null)}
-                  className="px-4 py-2.5 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-600 hover:text-slate-900 text-xs font-bold transition-all cursor-pointer font-sans"
-                >
-                  Discard
-                </button>
-                <button
-                  onClick={handleConfirmTranscription}
-                  disabled={!reviewTargetSessionId || !transcribedText.trim()}
-                  className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold transition-all hover:scale-105 active:scale-95 disabled:opacity-50 disabled:scale-100 cursor-pointer font-sans"
-                >
-                  Confirm & Save
-                </button>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+      {transcribedText !== null ? (
+        <TranscriptReviewModal
+          transcript={transcribedText}
+          sessions={studySessionsList}
+          targetSessionId={reviewTargetSessionId}
+          onTranscriptChange={setTranscribedText}
+          onTargetSessionChange={setReviewTargetSessionId}
+          onDiscard={() => setTranscribedText(null)}
+          onAdd={() => void handleConfirmTranscription()}
+        />
+      ) : null}
     </div>
   );
 }

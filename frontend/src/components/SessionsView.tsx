@@ -42,6 +42,7 @@ import { readVerseDragPayload, renderVerseDropHtml } from "@/lib/verseDrop";
 import {
   isSelectionSnapshotValid,
   resolveFontSizeState,
+  runConfirmedSessionDeletion,
   SessionSaveCoordinator,
   shouldLoadSessionContent,
   type EditorSelectionSnapshot,
@@ -92,6 +93,8 @@ export default function SessionsView() {
   const [exporting, setExporting] = useState(false);
   const [showSuccessFlash, setShowSuccessFlash] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
+  const deletionInProgressRef = useRef(false);
   const [titleInput, setTitleInput] = useState("");
   const titleInputRef = useRef(titleInput);
   const selectedSessionRef = useRef<Session | null>(null);
@@ -455,20 +458,33 @@ export default function SessionsView() {
     setSelectedSession(session);
   };
 
-  const handleDeleteSession = async (id: string, e: React.MouseEvent) => {
+  const handleDeleteSession = async (session: Session, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!confirm("Are you sure you want to delete this study session?")) return;
-    saveCoordinator.discardSession(id);
+    if (deletionInProgressRef.current) return;
+    deletionInProgressRef.current = true;
     try {
-      await deleteSession(id);
-      setSessions((prev) => prev.filter((s) => s.session_id !== id));
-      if (selectedSession?.session_id === id) {
+      const confirmed = await runConfirmedSessionDeletion({
+        sessionId: session.session_id,
+        title: session.title,
+        confirm: (message) => window.confirm(message),
+        discardPending: (sessionId) => saveCoordinator.discardSession(sessionId),
+        restorePending: (sessionId) => saveCoordinator.restoreSession(sessionId),
+        deleteSession: async (sessionId) => {
+          setDeletingSessionId(sessionId);
+          await deleteSession(sessionId);
+        },
+      });
+      if (!confirmed) return;
+      setSessions((prev) => prev.filter((item) => item.session_id !== session.session_id));
+      if (selectedSession?.session_id === session.session_id) {
         setSelectedSession(null);
       }
     } catch (err) {
-      saveCoordinator.restoreSession(id);
       console.error(err);
       setSaveError(`The study session could not be deleted: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      deletionInProgressRef.current = false;
+      setDeletingSessionId(null);
     }
   };
 
@@ -631,11 +647,15 @@ export default function SessionsView() {
                     </div>
                   </div>
                   <button
-                    onClick={(e) => handleDeleteSession(s.session_id, e)}
-                    className="opacity-0 group-hover/item:opacity-100 p-1 rounded-lg hover:bg-red-50 hover:text-red-600 text-slate-400 transition-all cursor-pointer"
+                    onClick={(e) => void handleDeleteSession(s, e)}
+                    disabled={deletingSessionId !== null}
+                    className="opacity-0 group-hover/item:opacity-100 p-1 rounded-lg hover:bg-red-50 hover:text-red-600 text-slate-400 transition-all cursor-pointer disabled:cursor-not-allowed disabled:opacity-30"
                     title="Delete session"
+                    aria-label={`Delete ${s.title}`}
                   >
-                    <Trash2 size={14} />
+                    {deletingSessionId === s.session_id
+                      ? <Loader2 size={14} className="animate-spin" />
+                      : <Trash2 size={14} />}
                   </button>
                 </div>
               );
