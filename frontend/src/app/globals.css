@@ -184,6 +184,53 @@
   font-family: var(--font-sans), sans-serif !important;
 }
 
+/* Study Sessions editor structures are scoped so the global reset stays intact. */
+.session-editor .ProseMirror ul {
+  list-style-type: disc;
+  margin: 0.75rem 0;
+  padding-left: 1.75rem;
+}
+
+.session-editor .ProseMirror ul ul {
+  list-style-type: circle;
+}
+
+.session-editor .ProseMirror ul ul ul {
+  list-style-type: square;
+}
+
+.session-editor .ProseMirror ol {
+  list-style-type: decimal;
+  margin: 0.75rem 0;
+  padding-left: 1.9rem;
+}
+
+.session-editor .ProseMirror ol ol {
+  list-style-type: lower-alpha;
+}
+
+.session-editor .ProseMirror li {
+  display: list-item;
+  margin: 0.25rem 0;
+  padding-left: 0.2rem;
+}
+
+.session-editor .ProseMirror li > p {
+  margin: 0;
+}
+
+.session-editor .ProseMirror blockquote {
+  margin: 1rem 0;
+  border-left: 4px solid #93c5fd;
+  padding: 0.5rem 0 0.5rem 1rem;
+  color: #475569;
+  background: rgba(239, 246, 255, 0.55);
+}
+
+.session-editor .ProseMirror blockquote p {
+  color: inherit;
+}
+
 @media print {
   html, body, main {
     height: auto !important;

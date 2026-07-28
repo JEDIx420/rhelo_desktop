@@ -1,9 +1,10 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { useEditor, EditorContent } from "@tiptap/react";
+import { useEditor, useEditorState, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { Mark } from "@tiptap/core";
+import { EditorState } from "@tiptap/pm/state";
 import { TextStyle } from "@tiptap/extension-text-style";
 import { TextAlign } from "@tiptap/extension-text-align";
 import { 
@@ -38,6 +39,14 @@ import {
   searchSessions, 
 } from "@/lib/api";
 import { readVerseDragPayload, renderVerseDropHtml } from "@/lib/verseDrop";
+import {
+  isSelectionSnapshotValid,
+  resolveFontSizeState,
+  SessionSaveCoordinator,
+  shouldLoadSessionContent,
+  type EditorSelectionSnapshot,
+} from "@/lib/sessionEditor";
+import { registerSessionSaveFlusher } from "@/lib/sessionSaveBridge";
 
 interface Session {
   session_id: string;
@@ -82,11 +91,36 @@ export default function SessionsView() {
   const [saving, setSaving] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [showSuccessFlash, setShowSuccessFlash] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [titleInput, setTitleInput] = useState("");
   const titleInputRef = useRef(titleInput);
   const selectedSessionRef = useRef<Session | null>(null);
-  const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const successFlashTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const mountedRef = useRef(true);
+  const loadedSessionIdRef = useRef<string | null>(null);
+  const synchronizingRef = useRef(false);
+  const documentGenerationRef = useRef(0);
+  const selectionSnapshotRef = useRef<EditorSelectionSnapshot | null>(null);
+  const [saveCoordinator] = useState(() => (
+    new SessionSaveCoordinator({
+      persist: async (snapshot) => {
+        await updateSession(snapshot.sessionId, snapshot.title, snapshot.content);
+      },
+    })
+  ));
+
+  const scheduleSessionSave = (htmlContent: string, flush = false) => {
+    const target = selectedSessionRef.current;
+    if (!target) return Promise.resolve();
+    saveCoordinator.schedule({
+      sessionId: target.session_id,
+      title: titleInputRef.current,
+      content: htmlContent,
+    });
+    return flush
+      ? saveCoordinator.flush(target.session_id)
+      : Promise.resolve();
+  };
 
   // Initialize TipTap
   const editor = useEditor({
@@ -101,8 +135,11 @@ export default function SessionsView() {
     ],
     content: "",
     onUpdate: ({ editor }) => {
+      if (synchronizingRef.current) return;
+      documentGenerationRef.current += 1;
+      selectionSnapshotRef.current = null;
       // Trigger auto-save after 1.5 seconds of inactivity
-      triggerAutoSave(editor.getHTML());
+      void scheduleSessionSave(editor.getHTML());
     },
     onFocus: ({ editor }) => {
       const today = new Date();
@@ -110,14 +147,69 @@ export default function SessionsView() {
       const html = editor.getHTML();
       if (!html.includes(dateString)) {
         const heading = `<h3 style="color: #2563eb; margin-top: 20px; margin-bottom: 8px; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px;">${dateString}</h3>`;
-        const cleanHtml = (html === "<p></p>" || html === "") ? "" : html;
-        editor.commands.setContent(cleanHtml + heading);
+        editor.commands.insertContentAt(editor.state.doc.content.size, heading);
       }
     },
     editorProps: {
       attributes: {
         class: "prose prose-slate focus:outline-none max-w-none h-full min-h-[400px] text-slate-800 leading-relaxed font-sans px-2",
       },
+    },
+  });
+
+  const toolbarState = useEditorState({
+    editor,
+    selector: ({ editor: currentEditor }) => {
+      if (!currentEditor) {
+        return {
+          bold: false,
+          italic: false,
+          underline: false,
+          strike: false,
+          bulletList: false,
+          orderedList: false,
+          blockquote: false,
+          heading: "p",
+          textAlign: "left",
+          canUndo: false,
+          canRedo: false,
+          fontSize: "16px" as string,
+        };
+      }
+
+      const { from, to, empty } = currentEditor.state.selection;
+      const explicitSizes: Array<string | null> = [];
+      if (empty) {
+        explicitSizes.push(currentEditor.getAttributes("fontSize").size ?? null);
+      } else {
+        currentEditor.state.doc.nodesBetween(from, to, (node, position) => {
+          if (!node.isText) return;
+          const nodeEnd = position + node.nodeSize;
+          if (nodeEnd <= from || position >= to) return;
+          const fontSizeMark = node.marks.find((mark) => mark.type.name === "fontSize");
+          explicitSizes.push(fontSizeMark?.attrs.size ?? null);
+        });
+      }
+
+      return {
+        bold: currentEditor.isActive("bold"),
+        italic: currentEditor.isActive("italic"),
+        underline: currentEditor.isActive("underline"),
+        strike: currentEditor.isActive("strike"),
+        bulletList: currentEditor.isActive("bulletList"),
+        orderedList: currentEditor.isActive("orderedList"),
+        blockquote: currentEditor.isActive("blockquote"),
+        heading: currentEditor.isActive("heading", { level: 1 }) ? "h1"
+          : currentEditor.isActive("heading", { level: 2 }) ? "h2"
+          : currentEditor.isActive("heading", { level: 3 }) ? "h3"
+          : "p",
+        textAlign: currentEditor.getAttributes("paragraph").textAlign
+          || currentEditor.getAttributes("heading").textAlign
+          || "left",
+        canUndo: currentEditor.can().undo(),
+        canRedo: currentEditor.can().redo(),
+        fontSize: resolveFontSizeState(explicitSizes),
+      };
     },
   });
 
@@ -170,15 +262,77 @@ export default function SessionsView() {
   }, [selectedSession]);
 
   useEffect(() => {
-    return () => {
-      if (saveTimeoutRef.current) {
-        clearTimeout(saveTimeoutRef.current);
+    mountedRef.current = true;
+    const unsubscribe = saveCoordinator.subscribe((event) => {
+      if (!mountedRef.current) return;
+      setSaving(false);
+      if (event.type === "error") {
+        setSaveError(`Your latest changes are still unsaved: ${event.error.message}`);
+        return;
       }
+
+      setSaveError(null);
+      const { snapshot } = event;
+      const updatedAt = new Date().toISOString();
+      setSessions((current) => current.map((session) => (
+        session.session_id === snapshot.sessionId
+          ? {
+              ...session,
+              title: snapshot.title,
+              content: snapshot.content,
+              updated_at: updatedAt,
+            }
+          : session
+      )));
+      if (selectedSessionRef.current?.session_id === snapshot.sessionId) {
+        selectedSessionRef.current = {
+          ...selectedSessionRef.current,
+          title: snapshot.title,
+          content: snapshot.content,
+          updated_at: updatedAt,
+        };
+      }
+    });
+    return () => {
+      mountedRef.current = false;
+      unsubscribe();
+      void saveCoordinator.flushAll().finally(() => saveCoordinator.dispose());
       if (successFlashTimeoutRef.current) {
         clearTimeout(successFlashTimeoutRef.current);
       }
     };
-  }, []);
+  }, [saveCoordinator]);
+
+  useEffect(() => registerSessionSaveFlusher(async () => {
+    await saveCoordinator.flushAll();
+  }), [saveCoordinator]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+
+    void import("@tauri-apps/api/window").then(async ({ getCurrentWindow }) => {
+      if (cancelled) return;
+      const appWindow = getCurrentWindow();
+      unlisten = await appWindow.onCloseRequested(async (event) => {
+        event.preventDefault();
+        try {
+          await saveCoordinator.flushAll();
+          await appWindow.destroy();
+        } catch {
+          // The coordinator already exposes a persistent error banner.
+        }
+      });
+      if (cancelled) unlisten();
+    }).catch(() => {
+      // Browser development mode does not expose a Tauri window.
+    });
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [saveCoordinator]);
 
   // Dispatch selection changes globally
   useEffect(() => {
@@ -210,7 +364,25 @@ export default function SessionsView() {
   // Update editor content when active session changes
   useEffect(() => {
     if (selectedSession && editor) {
-      editor.commands.setContent(selectedSession.content || "");
+      const incomingContent = selectedSession.content || "";
+      if (shouldLoadSessionContent({
+        currentHtml: editor.getHTML(),
+        incomingHtml: incomingContent,
+        currentSessionId: loadedSessionIdRef.current,
+        incomingSessionId: selectedSession.session_id,
+      })) {
+        synchronizingRef.current = true;
+        editor.commands.setContent(incomingContent, { emitUpdate: false });
+        editor.view.updateState(EditorState.create({
+          schema: editor.schema,
+          doc: editor.state.doc,
+          plugins: editor.state.plugins,
+        }));
+        loadedSessionIdRef.current = selectedSession.session_id;
+        documentGenerationRef.current += 1;
+        selectionSnapshotRef.current = null;
+        synchronizingRef.current = false;
+      }
       Promise.resolve().then(() => {
         setTitleInput(selectedSession.title);
         titleInputRef.current = selectedSession.title;
@@ -238,6 +410,7 @@ export default function SessionsView() {
 
   const handleCreateSession = async () => {
     try {
+      await saveCoordinator.flushAll();
       setLoading(true);
       const today = new Date();
       const dateString = today.toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
@@ -262,16 +435,7 @@ export default function SessionsView() {
     if (!selectedSession || !editor) return;
     setSaving(true);
     try {
-      const htmlContent = editor.getHTML();
-      await updateSession(selectedSession.session_id, titleInput, htmlContent);
-      const refreshed = await fetchSessions();
-      const refreshedSessions = refreshed.sessions || [];
-      setSessions(refreshedSessions);
-      setSelectedSession(
-        refreshedSessions.find((session: Session) => session.session_id === selectedSession.session_id)
-          || null,
-      );
-      window.dispatchEvent(new CustomEvent("rhelo-session-updated"));
+      await scheduleSessionSave(editor.getHTML(), true);
       
       // Flash save state
       setTimeout(() => setSaving(false), 500);
@@ -281,33 +445,20 @@ export default function SessionsView() {
     }
   };
 
-  const triggerAutoSave = (htmlContent: string) => {
-    if (saveTimeoutRef.current) {
-      clearTimeout(saveTimeoutRef.current);
+  const handleSelectSession = async (session: Session) => {
+    if (session.session_id === selectedSessionRef.current?.session_id) return;
+    try {
+      await saveCoordinator.flushAll();
+    } catch {
+      // Navigation continues; the failed immutable snapshot remains retryable.
     }
-    saveTimeoutRef.current = setTimeout(async () => {
-      const targetSession = selectedSessionRef.current;
-      if (!targetSession) return;
-      try {
-        const currentTitle = titleInputRef.current;
-        await updateSession(targetSession.session_id, currentTitle, htmlContent);
-        const refreshed = await fetchSessions();
-        const refreshedSessions = refreshed.sessions || [];
-        const refreshedTarget = refreshedSessions.find(
-          (session: Session) => session.session_id === targetSession.session_id,
-        );
-        setSessions(refreshedSessions);
-        if (refreshedTarget) selectedSessionRef.current = refreshedTarget;
-        window.dispatchEvent(new CustomEvent("rhelo-session-updated"));
-      } catch (err) {
-        console.error("Auto-save failed", err);
-      }
-    }, 1500);
+    setSelectedSession(session);
   };
 
   const handleDeleteSession = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (!confirm("Are you sure you want to delete this study session?")) return;
+    saveCoordinator.discardSession(id);
     try {
       await deleteSession(id);
       setSessions((prev) => prev.filter((s) => s.session_id !== id));
@@ -315,7 +466,9 @@ export default function SessionsView() {
         setSelectedSession(null);
       }
     } catch (err) {
+      saveCoordinator.restoreSession(id);
       console.error(err);
+      setSaveError(`The study session could not be deleted: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
@@ -350,19 +503,60 @@ export default function SessionsView() {
       const html = editor.getHTML();
       if (!html.includes(dateString)) {
         const heading = `<h3 style="color: #2563eb; margin-top: 20px; margin-bottom: 8px; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px;">${dateString}</h3>`;
-        const cleanHtml = (html === "<p></p>" || html === "") ? "" : html;
-        editor.commands.setContent(cleanHtml + heading);
+        editor.commands.insertContentAt(editor.state.doc.content.size, heading);
       }
 
       if (versePayload) {
         editor.commands.insertContent(renderVerseDropHtml(versePayload));
-        triggerAutoSave(editor.getHTML());
+        void scheduleSessionSave(editor.getHTML());
       }
     }
   };
 
+  const captureSelection = () => {
+    if (!editor) return;
+    selectionSnapshotRef.current = {
+      from: editor.state.selection.from,
+      to: editor.state.selection.to,
+      documentGeneration: documentGenerationRef.current,
+    };
+  };
+
+  const restoreCapturedSelection = () => {
+    if (!editor || !selectionSnapshotRef.current) return;
+    const snapshot = selectionSnapshotRef.current;
+    if (!isSelectionSnapshotValid(
+      snapshot,
+      documentGenerationRef.current,
+      editor.state.doc.content.size,
+    )) {
+      selectionSnapshotRef.current = null;
+      return;
+    }
+    editor.commands.setTextSelection({ from: snapshot.from, to: snapshot.to });
+  };
+
+  const handleToolbarPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if ((event.target as HTMLElement).closest("button")) event.preventDefault();
+  };
+
   return (
     <div className="flex h-full w-full overflow-hidden bg-slate-50 print:!block print:!h-auto print:!overflow-visible print:bg-white print-expand-shell">
+      {saveError ? (
+        <div className="fixed left-1/2 top-5 z-[2600] flex max-w-xl -translate-x-1/2 items-center gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950 shadow-xl">
+          <span>{saveError}</span>
+          <button
+            type="button"
+            onClick={() => {
+              setSaving(true);
+              void saveCoordinator.flushAll().catch(() => undefined);
+            }}
+            className="rounded-md bg-amber-100 px-2 py-1 font-semibold hover:bg-amber-200"
+          >
+            Retry
+          </button>
+        </div>
+      ) : null}
       {/* Left Sidebar List Pane */}
       <div className="w-80 border-r border-slate-200 flex flex-col shrink-0 bg-white print:hidden print-hide-sidebar">
         <div className="h-16 px-5 border-b border-slate-200 flex items-center justify-between shrink-0">
@@ -420,7 +614,7 @@ export default function SessionsView() {
               return (
                 <div
                   key={s.session_id}
-                  onClick={() => setSelectedSession(s)}
+                  onClick={() => void handleSelectSession(s)}
                   className="w-full text-left p-3.5 rounded-xl transition-all flex items-start gap-3 cursor-pointer border border-transparent hover:border-slate-200 group/item font-sans"
                   style={{
                     background: isSelected ? "rgba(37, 99, 235, 0.05)" : "transparent",
@@ -470,7 +664,7 @@ export default function SessionsView() {
                 onChange={(e) => {
                   setTitleInput(e.target.value);
                   titleInputRef.current = e.target.value;
-                  if (editor) triggerAutoSave(editor.getHTML());
+                  if (editor) void scheduleSessionSave(editor.getHTML());
                 }}
                 className="font-bold text-lg text-slate-800 border-none outline-none bg-transparent focus:ring-0 w-2/3 font-sans"
                 placeholder="Session Title"
@@ -515,13 +709,16 @@ export default function SessionsView() {
             </div>
 
             {/* Formatting Toolbar */}
-            <div className="border-b border-slate-200 bg-slate-50/50 p-2 flex flex-wrap items-center gap-1 shrink-0 select-none print:hidden print-hide-toolbar">
+            <div
+              onPointerDown={handleToolbarPointerDown}
+              className="border-b border-slate-200 bg-slate-50/50 p-2 flex flex-wrap items-center gap-1 shrink-0 select-none print:hidden print-hide-toolbar"
+            >
               {/* Undo / Redo */}
               <div className="flex items-center gap-0.5 border-r border-slate-200 pr-1.5 mr-1.5">
                 <button
                   type="button"
                   onClick={() => editor?.chain().focus().undo().run()}
-                  disabled={!editor?.can().undo()}
+                  disabled={!toolbarState?.canUndo}
                   className="p-1.5 rounded-lg hover:bg-slate-200/60 text-slate-600 disabled:opacity-30 cursor-pointer transition-colors"
                   title="Undo"
                 >
@@ -530,7 +727,7 @@ export default function SessionsView() {
                 <button
                   type="button"
                   onClick={() => editor?.chain().focus().redo().run()}
-                  disabled={!editor?.can().redo()}
+                  disabled={!toolbarState?.canRedo}
                   className="p-1.5 rounded-lg hover:bg-slate-200/60 text-slate-600 disabled:opacity-30 cursor-pointer transition-colors"
                   title="Redo"
                 >
@@ -541,12 +738,11 @@ export default function SessionsView() {
               {/* Headings & Text Styles */}
               <div className="flex items-center gap-1 border-r border-slate-200 pr-1.5 mr-1.5">
                 <select
-                  value={
-                    editor?.isActive('heading', { level: 1 }) ? 'h1' :
-                    editor?.isActive('heading', { level: 2 }) ? 'h2' :
-                    editor?.isActive('heading', { level: 3 }) ? 'h3' : 'p'
-                  }
+                  onPointerDown={captureSelection}
+                  onFocus={captureSelection}
+                  value={toolbarState?.heading || "p"}
                   onChange={(e) => {
+                    restoreCapturedSelection();
                     const val = e.target.value;
                     if (val === 'p') editor?.chain().focus().setParagraph().run();
                     else if (val === 'h1') editor?.chain().focus().toggleHeading({ level: 1 }).run();
@@ -565,9 +761,13 @@ export default function SessionsView() {
               {/* Font Size Selector */}
               <div className="flex items-center gap-0.5 border-r border-slate-200 pr-1.5 mr-1.5">
                 <select
-                  value={editor?.getAttributes('fontSize').size || '16px'}
+                  onPointerDown={captureSelection}
+                  onFocus={captureSelection}
+                  value={toolbarState?.fontSize || '16px'}
                   onChange={(e) => {
+                    restoreCapturedSelection();
                     const size = e.target.value;
+                    if (size === "mixed") return;
                     if (size === 'default') {
                       editor?.chain().focus().unsetMark('fontSize').run();
                     } else {
@@ -576,6 +776,7 @@ export default function SessionsView() {
                   }}
                   className="text-xs border border-slate-200 bg-white rounded-md px-2 py-1.5 outline-none text-slate-800 font-sans cursor-pointer hover:border-slate-350 transition-colors font-medium"
                 >
+                  <option value="mixed" disabled>Mixed</option>
                   <option value="12px">12px</option>
                   <option value="14px">14px</option>
                   <option value="16px">16px (Default)</option>
@@ -591,7 +792,7 @@ export default function SessionsView() {
                 <button
                   type="button"
                   onClick={() => {
-                    const current = editor?.getAttributes('fontSize').size || '16px';
+                    const current = toolbarState?.fontSize === "mixed" ? "16px" : toolbarState?.fontSize || '16px';
                     const num = parseInt(current, 10) || 16;
                     const next = Math.min(72, num + 2);
                     editor?.chain().focus().setMark('fontSize', { size: `${next}px` }).run();
@@ -604,7 +805,7 @@ export default function SessionsView() {
                 <button
                   type="button"
                   onClick={() => {
-                    const current = editor?.getAttributes('fontSize').size || '16px';
+                    const current = toolbarState?.fontSize === "mixed" ? "16px" : toolbarState?.fontSize || '16px';
                     const num = parseInt(current, 10) || 16;
                     const next = Math.max(8, num - 2);
                     editor?.chain().focus().setMark('fontSize', { size: `${next}px` }).run();
@@ -622,7 +823,7 @@ export default function SessionsView() {
                   type="button"
                   onClick={() => editor?.chain().focus().toggleBold().run()}
                   className={`p-1.5 rounded-lg cursor-pointer transition-colors ${
-                    editor?.isActive('bold') ? 'bg-blue-100 text-blue-700 font-bold' : 'hover:bg-slate-200/60 text-slate-600'
+                    toolbarState?.bold ? 'bg-blue-100 text-blue-700 font-bold' : 'hover:bg-slate-200/60 text-slate-600'
                   }`}
                   title="Bold"
                 >
@@ -632,7 +833,7 @@ export default function SessionsView() {
                   type="button"
                   onClick={() => editor?.chain().focus().toggleItalic().run()}
                   className={`p-1.5 rounded-lg cursor-pointer transition-colors ${
-                    editor?.isActive('italic') ? 'bg-blue-100 text-blue-700 font-bold' : 'hover:bg-slate-200/60 text-slate-600'
+                    toolbarState?.italic ? 'bg-blue-100 text-blue-700 font-bold' : 'hover:bg-slate-200/60 text-slate-600'
                   }`}
                   title="Italic"
                 >
@@ -642,7 +843,7 @@ export default function SessionsView() {
                   type="button"
                   onClick={() => editor?.chain().focus().toggleUnderline().run()}
                   className={`p-1.5 rounded-lg cursor-pointer transition-colors ${
-                    editor?.isActive('underline') ? 'bg-blue-100 text-blue-700 font-bold' : 'hover:bg-slate-200/60 text-slate-600'
+                    toolbarState?.underline ? 'bg-blue-100 text-blue-700 font-bold' : 'hover:bg-slate-200/60 text-slate-600'
                   }`}
                   title="Underline"
                 >
@@ -652,7 +853,7 @@ export default function SessionsView() {
                   type="button"
                   onClick={() => editor?.chain().focus().toggleStrike().run()}
                   className={`p-1.5 rounded-lg cursor-pointer transition-colors ${
-                    editor?.isActive('strike') ? 'bg-blue-100 text-blue-700 font-bold' : 'hover:bg-slate-200/60 text-slate-600'
+                    toolbarState?.strike ? 'bg-blue-100 text-blue-700 font-bold' : 'hover:bg-slate-200/60 text-slate-600'
                   }`}
                   title="Strikethrough"
                 >
@@ -666,7 +867,7 @@ export default function SessionsView() {
                   type="button"
                   onClick={() => editor?.chain().focus().setTextAlign('left').run()}
                   className={`p-1.5 rounded-lg cursor-pointer transition-colors ${
-                    editor?.isActive({ textAlign: 'left' }) ? 'bg-blue-100 text-blue-700' : 'hover:bg-slate-200/60 text-slate-600'
+                    toolbarState?.textAlign === 'left' ? 'bg-blue-100 text-blue-700' : 'hover:bg-slate-200/60 text-slate-600'
                   }`}
                   title="Align Left"
                 >
@@ -676,7 +877,7 @@ export default function SessionsView() {
                   type="button"
                   onClick={() => editor?.chain().focus().setTextAlign('center').run()}
                   className={`p-1.5 rounded-lg cursor-pointer transition-colors ${
-                    editor?.isActive({ textAlign: 'center' }) ? 'bg-blue-100 text-blue-700' : 'hover:bg-slate-200/60 text-slate-600'
+                    toolbarState?.textAlign === 'center' ? 'bg-blue-100 text-blue-700' : 'hover:bg-slate-200/60 text-slate-600'
                   }`}
                   title="Align Center"
                 >
@@ -686,7 +887,7 @@ export default function SessionsView() {
                   type="button"
                   onClick={() => editor?.chain().focus().setTextAlign('right').run()}
                   className={`p-1.5 rounded-lg cursor-pointer transition-colors ${
-                    editor?.isActive({ textAlign: 'right' }) ? 'bg-blue-100 text-blue-700' : 'hover:bg-slate-200/60 text-slate-600'
+                    toolbarState?.textAlign === 'right' ? 'bg-blue-100 text-blue-700' : 'hover:bg-slate-200/60 text-slate-600'
                   }`}
                   title="Align Right"
                 >
@@ -696,7 +897,7 @@ export default function SessionsView() {
                   type="button"
                   onClick={() => editor?.chain().focus().setTextAlign('justify').run()}
                   className={`p-1.5 rounded-lg cursor-pointer transition-colors ${
-                    editor?.isActive({ textAlign: 'justify' }) ? 'bg-blue-100 text-blue-700' : 'hover:bg-slate-200/60 text-slate-600'
+                    toolbarState?.textAlign === 'justify' ? 'bg-blue-100 text-blue-700' : 'hover:bg-slate-200/60 text-slate-600'
                   }`}
                   title="Align Justify"
                 >
@@ -710,7 +911,7 @@ export default function SessionsView() {
                   type="button"
                   onClick={() => editor?.chain().focus().toggleBulletList().run()}
                   className={`p-1.5 rounded-lg cursor-pointer transition-colors ${
-                    editor?.isActive('bulletList') ? 'bg-blue-100 text-blue-700' : 'hover:bg-slate-200/60 text-slate-600'
+                    toolbarState?.bulletList ? 'bg-blue-100 text-blue-700' : 'hover:bg-slate-200/60 text-slate-600'
                   }`}
                   title="Bullet List"
                 >
@@ -720,7 +921,7 @@ export default function SessionsView() {
                   type="button"
                   onClick={() => editor?.chain().focus().toggleOrderedList().run()}
                   className={`p-1.5 rounded-lg cursor-pointer transition-colors ${
-                    editor?.isActive('orderedList') ? 'bg-blue-100 text-blue-700' : 'hover:bg-slate-200/60 text-slate-600'
+                    toolbarState?.orderedList ? 'bg-blue-100 text-blue-700' : 'hover:bg-slate-200/60 text-slate-600'
                   }`}
                   title="Numbered List"
                 >
@@ -734,7 +935,7 @@ export default function SessionsView() {
                   type="button"
                   onClick={() => editor?.chain().focus().toggleBlockquote().run()}
                   className={`p-1.5 rounded-lg cursor-pointer transition-colors ${
-                    editor?.isActive('blockquote') ? 'bg-blue-100 text-blue-700' : 'hover:bg-slate-200/60 text-slate-600'
+                    toolbarState?.blockquote ? 'bg-blue-100 text-blue-700' : 'hover:bg-slate-200/60 text-slate-600'
                   }`}
                   title="Blockquote"
                 >
@@ -749,7 +950,7 @@ export default function SessionsView() {
               onDrop={handleDropVerse}
               className="flex-1 overflow-y-auto p-8 relative group print:!block print:!h-auto print:!overflow-visible print:!max-h-none print:!p-0 print-expand-editor"
             >
-              <EditorContent editor={editor} className="h-full print:!block print:!h-auto print:!overflow-visible" />
+              <EditorContent editor={editor} className="session-editor h-full print:!block print:!h-auto print:!overflow-visible" />
             </div>
 
           </>

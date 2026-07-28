@@ -10,6 +10,7 @@ import { Mic, Save } from "lucide-react";
 import { fetchSessions, updateSession } from "@/lib/api";
 import { readVerseDragPayload, renderVerseDropHtml, VerseDragPayload } from "@/lib/verseDrop";
 import { createTtsSettingsTarget, type OriginalLanguage, type TtsSettingsTarget } from "@/lib/ttsRecovery";
+import { flushActiveSessionEdits } from "@/lib/sessionSaveBridge";
 
 const invokeTauri = async (cmd: string, args: any) => {
   if (typeof window !== "undefined" && (window as any).__TAURI_INTERNALS__ !== undefined) {
@@ -91,6 +92,10 @@ export default function Home() {
   const [selectedVerseId, setSelectedVerseId] = useState<string | null>(null);
   const [selectedPersonId, setSelectedPersonId] = useState<string | null>("Adam_1");
   const [settingsTarget, setSettingsTarget] = useState<TtsSettingsTarget | null>(null);
+  const [sessionSaveError, setSessionSaveError] = useState<{
+    message: string;
+    targetView: string;
+  } | null>(null);
 
   // Drag-and-drop overlays state
   const [draggedVerse, setDraggedVerse] = useState<VerseDragPayload | null>(null);
@@ -323,6 +328,7 @@ export default function Home() {
   const handleConfirmTranscription = async () => {
     if (!reviewTargetSessionId || !transcribedText || !transcribedText.trim()) return;
     try {
+      await flushActiveSessionEdits();
       const sessionsResponse = await fetchSessions();
       const sessions = sessionsResponse.sessions || [];
       const targetSession = sessions.find((session: any) => session.session_id === reviewTargetSessionId);
@@ -362,14 +368,28 @@ export default function Home() {
     }
   };
 
-  const handleViewChange = (view: string) => {
+  const handleViewChange = async (view: string) => {
+    if (activeView === "sessions" && view !== "sessions") {
+      try {
+        await flushActiveSessionEdits();
+        setSessionSaveError(null);
+      } catch (error) {
+        setSessionSaveError({
+          message: `Study Session changes could not be saved before navigation: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          targetView: view,
+        });
+        return;
+      }
+    }
     if (view !== "settings") setSettingsTarget(null);
     setActiveView(view);
   };
 
   const handleGoToTtsSettings = (missingLanguage: OriginalLanguage) => {
     setSettingsTarget(createTtsSettingsTarget(missingLanguage, Date.now()));
-    setActiveView("settings");
+    void handleViewChange("settings");
   };
 
   return (
@@ -416,6 +436,31 @@ export default function Home() {
       </main>
 
       <TtsWarning onGoToSettings={handleGoToTtsSettings} />
+
+      {sessionSaveError ? (
+        <div className="fixed bottom-6 left-1/2 z-[2500] flex max-w-2xl -translate-x-1/2 items-center gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950 shadow-xl">
+          <span>{sessionSaveError.message} Your captured changes remain queued while this editor stays open.</span>
+          <button
+            type="button"
+            onClick={() => void handleViewChange(sessionSaveError.targetView)}
+            className="shrink-0 rounded-md bg-amber-100 px-2 py-1 font-semibold hover:bg-amber-200"
+          >
+            Retry
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              const targetView = sessionSaveError.targetView;
+              setSessionSaveError(null);
+              if (targetView !== "settings") setSettingsTarget(null);
+              setActiveView(targetView);
+            }}
+            className="shrink-0 rounded-md px-2 py-1 font-semibold hover:bg-amber-100"
+          >
+            Leave without saving
+          </button>
+        </div>
+      ) : null}
 
       {/* --- FLOATING WORKSPACE OVERLAYS --- */}
 
@@ -472,6 +517,7 @@ export default function Home() {
           console.log("[DRAG-DEBUG] Current draggedVerse state:", draggedVerse);
           if (versePayload) {
             try {
+              await flushActiveSessionEdits();
               const sessionsResponse = await fetchSessions();
               const sessions = sessionsResponse.sessions || [];
               const targetSession = sessions.find((session: any) => session.session_id === activeSessionId) || sessions[0];
