@@ -413,6 +413,30 @@ fn speak_text(
     Ok(())
 }
 
+/// Reports whether the platform speech engine can voice `lang`.
+///
+/// The interface cannot answer this itself: WebKitGTK has no Web Speech API,
+/// and even where the browser exposes one it describes a different voice set
+/// than the native engine this app actually speaks through.
+#[tauri::command]
+fn has_tts_voice(lang: String, tts_state: tauri::State<'_, Mutex<Tts>>) -> Result<bool, String> {
+    let tts = tts_state.lock().map_err(|_| "Failed to lock TTS state")?;
+    let target_locale = canonical_tts_locale(&lang)?;
+    let voices = tts
+        .voices()
+        .map_err(|error| format!("Failed to query installed TTS voices: {error}"))?;
+    let voice_languages: Vec<String> = voices
+        .iter()
+        .map(|voice| voice.language().to_string())
+        .collect();
+    let voice_names: Vec<String> = voices
+        .iter()
+        .map(|voice| voice.name().to_string())
+        .collect();
+
+    Ok(select_voice_index(&voice_languages, &voice_names, target_locale).is_some())
+}
+
 fn normalize_language_tag(language: &str) -> String {
     language.trim().to_lowercase().replace('_', "-")
 }
@@ -659,6 +683,7 @@ pub fn run() {
             delete_session,
             speak_text,
             stop_speech,
+            has_tts_voice,
             transcribe_audio
         ])
         .build(tauri::generate_context!())
