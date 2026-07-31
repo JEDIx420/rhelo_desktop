@@ -15,8 +15,16 @@ const SUPPORTED_TTS_LANGUAGES = new Set(["en", "el", "he"]);
 const normalizeLanguage = (language: string) =>
   language.toLowerCase().replace("_", "-").split("-")[0];
 
+// WebKitGTK ships without the Web Speech API, so `window.speechSynthesis` is
+// undefined on Linux. WKWebView on macOS provides it. Inside Tauri the native
+// command path is used instead and never reaches these branches.
+const getSpeechSynthesis = (): SpeechSynthesis | undefined =>
+  typeof window !== "undefined" ? window.speechSynthesis : undefined;
+
 export const ensureGreekVoice = (): boolean => {
-  const voices = window.speechSynthesis.getVoices();
+  const synthesis = getSpeechSynthesis();
+  if (!synthesis) return false;
+  const voices = synthesis.getVoices();
   return voices.some((voice) => voice.lang.toLowerCase().includes("el"));
 };
 
@@ -27,8 +35,10 @@ export async function invokeSpeech(command: SpeechCommand, args: SpeechArguments
     return;
   }
 
+  const synthesis = getSpeechSynthesis();
+
   if (command === "stop_speech") {
-    window.speechSynthesis.cancel();
+    synthesis?.cancel();
     return;
   }
 
@@ -37,11 +47,14 @@ export async function invokeSpeech(command: SpeechCommand, args: SpeechArguments
   if (!SUPPORTED_TTS_LANGUAGES.has(normalizedLanguage)) {
     throw new Error("Rhelo TTS supports English, Hebrew, and Greek only.");
   }
-  window.speechSynthesis.cancel();
+  if (!synthesis) {
+    throw new Error("Speech synthesis is not available in this browser.");
+  }
+  synthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
   const languages: Record<string, string> = {
     el: "el-GR", en: "en-US", he: "he-IL",
   };
   utterance.lang = languages[normalizedLanguage] || lang.replace("_", "-");
-  window.speechSynthesis.speak(utterance);
+  synthesis.speak(utterance);
 }

@@ -5,6 +5,11 @@ type TtsStatus = "checking" | "ready" | "missing";
 const normalizeLanguage = (language: string) =>
   language.toLowerCase().replace("_", "-");
 
+// WebKitGTK ships without the Web Speech API, so `window.speechSynthesis` is
+// undefined on Linux. WKWebView on macOS provides it.
+const getSpeechSynthesis = (): SpeechSynthesis | undefined =>
+  typeof window !== "undefined" ? window.speechSynthesis : undefined;
+
 export const useTtsDetector = (lang: string = "el-GR") => {
   const [status, setStatus] = useState<TtsStatus>("checking");
 
@@ -12,6 +17,12 @@ export const useTtsDetector = (lang: string = "el-GR") => {
     let cancelled = false;
     let retries = 0;
     const maxRetries = 10;
+
+    const synthesis = getSpeechSynthesis();
+    if (!synthesis) {
+      setStatus("missing");
+      return;
+    }
 
     const matchesLanguage = (voiceLang: string) => {
       const normalizedVoice = normalizeLanguage(voiceLang);
@@ -27,7 +38,7 @@ export const useTtsDetector = (lang: string = "el-GR") => {
 
     const checkVoices = () => {
       if (cancelled) return false;
-      const voices = window.speechSynthesis.getVoices();
+      const voices = synthesis.getVoices();
       if (voices.some((voice) => matchesLanguage(voice.lang) || /greek|stefanos/i.test(voice.name))) {
         setStatus("ready");
         return true;
@@ -64,12 +75,12 @@ export const useTtsDetector = (lang: string = "el-GR") => {
       }
     };
 
-    window.speechSynthesis.addEventListener("voiceschanged", handleVoicesChanged);
+    synthesis.addEventListener("voiceschanged", handleVoicesChanged);
 
     return () => {
       cancelled = true;
       window.clearInterval(interval);
-      window.speechSynthesis.removeEventListener("voiceschanged", handleVoicesChanged);
+      synthesis.removeEventListener("voiceschanged", handleVoicesChanged);
     };
   }, [lang]);
 
